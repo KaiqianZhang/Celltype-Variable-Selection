@@ -7,3 +7,4 @@ output:
 ---
 
 Welcome to my research website.
+Click on this [link](variable-selection-celltype.html) to see my results.
