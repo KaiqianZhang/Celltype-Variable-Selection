@@ -1,0 +1,373 @@
+---
+title: "Variable Selection Celltype"
+author: "Kaiqian Zhang"
+date: "6/22/2018"
+output:
+  workflowr::wflow_html:
+    toc: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::knit_hooks$get("inline")
+devtools::install_github("stephenslab/susieR")
+devtools::install_github("hazimehh/L0Learn")
+```
+
+```{r, warning=FALSE}
+library(Matrix)
+library(glmnet)
+library(susieR)
+library(matrixStats)
+library(L0Learn)
+```
+
+## Data
+```{r warning=FALSE}
+setwd("~/Desktop/M/Celltype-Variable-Selection/analysis")
+b.data = readMM('../data/b_filtered/hg19/matrix.mtx.gz')
+cd34.data = readMM('../data/cd34_filtered/hg19/matrix.mtx.gz')
+jurkat.data = readMM('../data/jurkat_filtered/hg19/matrix.mtx.gz')
+monocytes.data = readMM('../data/monocytes_filtered/hg19/matrix.mtx.gz')
+regulatory.t.data = readMM('../data/regulatory_t_filtered/hg19/matrix.mtx.gz')
+```
+
+```{r}
+set.seed(1)
+# First X1: consider B cells and monocytes cells classification problem
+b.cells = b.data[,sample(ncol(b.data),1000)]
+monocytes.cells = monocytes.data[,sample(ncol(monocytes.data),1000)]
+# Second X2: consider B cells and T cells classification problem
+regulatory.t.cells = regulatory.t.data[,sample(ncol(regulatory.t.data),1000)]
+# X1.raw is a n=2000 by p=32738 matrix
+# X1 is a n=2000 by p=14125 matrix after removing columns with all zeros
+X1.raw = t(cbind(b.cells,monocytes.cells))
+keepX1 = which(colSums(X1.raw)!=0)
+X1 = X1.raw[,keepX1]
+# X2.raw is a n=2000 by p=32738 matrix
+# X2 is also a n=2000 by p=14125 matrix after removing columns with all zeros
+X2.raw = t(cbind(b.cells,regulatory.t.cells))
+keepX2 = which(colSums(X2.raw)!=0)
+X2 = X2.raw[,keepX1]
+# y.binary is a 2000-vector
+y.binary = c(rep(1,1000), rep(0, 1000))
+```
+
+```{r}
+# split evenly into training and testing data
+X1.train = rbind(X1[1:500,], X1[1001:1500,])
+X1.test = rbind(X1[501:1000,], X1[1501:2000,])
+X2.train = rbind(X2[1:500,], X2[1001:1500,])
+X2.test = rbind(X2[501:1000,], X2[1501:2000,])
+y.binary.train = c(rep(1,500), rep(0,500))
+y.binary.test = c(rep(1,500), rep(0,500))
+```
+
+# X2 analysis:
+Last time analyses on X2 show that glmnet needs 31 features, L0Learn with L0 regularization needs 101 features (sorry, I said 102 since I included intercept), and susie needs 5 features. We want to further investigate that why those methods select different numbers of features.
+
+## Four sparse regression methods
+We first run four methods on X2: glmnet, L0Learn with L0 regularization(we call it L0), L0Learn with L0L2 regularization(we call it L0L2), and susie. Note that we also run L0L2 and it only needs 1 feature(i.e.V4093), which is picked by all four methods. We observe that 1 feature from L0L2 and 5 features from susie are also included by 101 L0 features. The 31 glmnet features, however, do not have many overlappings with 101 L0 features. (Q1???) 
+
+### Fit glmnet
+```{r}
+X2fit.glmnet = cv.glmnet(X2.train,y.binary.train, family='binomial')
+```
+
+```{r}
+plot(X2fit.glmnet)
+```
+
+```{r}
+X2.glmnet.coefs = coef(X2fit.glmnet, s = "lambda.min")
+X2.glmnet.features = which(X2.glmnet.coefs!=0)-1
+X2.glmnet.coefVals = X2.glmnet.coefs[X2.glmnet.features+1]
+X2.glmnet.coefVals = X2.glmnet.coefVals[-1]
+X2.glmnet.features = X2.glmnet.features[-1]
+length(X2.glmnet.features)
+X2.glmnet.features
+X2.glmnet.coefVals
+```
+
+### Fit L0Learn with L0-regularization
+```{r}
+X2fit.L0Learn.L0 = L0Learn.cvfit(as.matrix(X2.train), y.binary.train, Penalty='L0')
+```
+
+```{r}
+lambdaIndex = which.min(X2fit.L0Learn.L0$cvmeans) # find the optimal lambda, which has minimum cv error
+X2coef.L0Learn.L0 = coef(X2fit.L0Learn.L0, lambda = X2fit.L0Learn.L0$lambda[lambdaIndex])
+X2coefIndex.L0Learn.L0 = which(X2coef.L0Learn.L0!=0)-1
+length(X2coefIndex.L0Learn.L0)-1
+X2coefIndex.L0Learn.L0 = X2coefIndex.L0Learn.L0[-1]
+X2coefIndex.L0Learn.L0
+X2coefValue.L0Learn.L0 = X2coef.L0Learn.L0[(X2coefIndex.L0Learn.L0+1)]
+X2coefValue.L0Learn.L0
+```
+
+### Fit L0Learn with L0L2-regularization: (Following https://github.com/hazimehh/L0Learn/wiki/Usage)
+```{r}
+X2fit.L0Learn.L0L2 = L0Learn.cvfit(as.matrix(X2.train), y.binary.train, Penalty='L0L2')
+```
+
+```{r}
+X2.L0L2.cv.error = lapply(X2fit.L0Learn.L0L2$cvmeans, min)
+X2.gammaIndex = 10 # observed from X2.L0L2.cv.error output
+X2.OptimalIndex = which.min(X2fit.L0Learn.L0L2$cvmeans[[X2.gammaIndex]])
+X2.OptimalLambda = X2fit.L0Learn.L0L2$lambda[[X2.gammaIndex]][X2.OptimalIndex]
+X2coef.L0Learn.L0L2 = coef(X2fit.L0Learn.L0L2, lambda=X2.OptimalLambda, gamma=X2fit.L0Learn.L0L2$gamma[10])
+X2coefIndex.L0Learn.L0L2 = which(X2coef.L0Learn.L0L2!=0)-1
+X2coefIndex.L0Learn.L0L2 = X2coefIndex.L0Learn.L0L2[-1]
+length(X2coefIndex.L0Learn.L0L2)
+X2coefIndex.L0Learn.L0L2
+X2coefValue.L0Learn.L0L2 = X2coef.L0Learn.L0L2[(X2coefIndex.L0Learn.L0L2+1)]
+X2coefValue.L0Learn.L0L2
+```
+
+### Fit susie
+```{r}
+X2fit.susie = susie(as.matrix(X2.train), y.binary.train, L=20)
+```
+
+```{r}
+X2.susie.CS = susie_get_CS(X2fit.susie)
+X2.susie.CSsize = c()
+for (i in 1:20){
+  X2.susie.CSsize = c(X2.susie.CSsize,length(X2.susie.CS[[1]][[i]]))
+}
+X2.susie.CSsize
+X2.susie.features = unlist(X2.susie.CS[[1]][1:5])
+X2.susie.features
+```
+
+### Whether features from glmnet, L0L2, susie are included by 101 L0 features?
+```{r}
+X2.glmnet.features %in% X2coefIndex.L0Learn.L0
+X2coefIndex.L0Learn.L0L2 %in% X2coefIndex.L0Learn.L0
+X2.susie.features %in% X2coefIndex.L0Learn.L0
+X2.susie.features %in% X2.glmnet.features
+```
+
+## Additional 96 features (101 L0 - 5 susie = 96)
+### Do additional features matter in the prediction?
+Notice that we have 1000 observations in the training set. The following shows the number of nonzeros in selected 101 L0 Xs and also that in selected 5 susie Xs.  
+```{r}
+colSums(X2.train[,X2coefIndex.L0Learn.L0]!=0)
+colSums(X2.train[,unlist(X2.susie.CS[[1]][1:5])]!=0)
+```
+
+Here is the number of nonzeros for additional 96 features. 
+```{r}
+additional = setdiff(X2coefIndex.L0Learn.L0[-1],unlist(X2.susie.CS[[1]][1:5]))
+additional_nonzeros = colSums(X2.train[,additional]!=0)
+additional_nonzeros
+```
+
+ 
+```{r}
+odd.additional = additional[additional_nonzeros>300]
+odd.additional
+```
+Most of additional features have fewer than 300 nonzeros. We, however, still have five additional features V`r odd.additional[1]`, V`r odd.additional[2]`, V`r odd.additional[3]`, V`r odd.additional[4]`, V`r odd.additional[5]`, which have more than 300 nonzeros. 
+
+We take a further look at those additional five features and notice that sums of their nonzeros (the 1st output below) are relatively smaller than that of five susie features(the 2nd output below), except the third feature in susie, which is V`r unlist(X2.susie.CS[[1]][1:5])[3]`. This feature is a bit wierd since it has only 383 nonzero values and the sum of nonzeros is also not very high(827).    
+```{r}
+colSums(X2.train[,odd.additional])
+colSums(X2.train[,unlist(X2.susie.CS[[1]][1:5])])
+```
+
+### Whether additional 96 features are selected by random? Consider p-values.
+```{r, warning=FALSE}
+add96.features = setdiff(X2coefIndex.L0Learn.L0, X2.susie.features)
+p.values = numeric(96)
+for (i in 1:96){
+  fit = glm(y.binary.train~X2.train[,add96.features[i]], family=binomial(link='logit'))
+  pval = as.numeric(coef(summary(fit))[,4][2])
+  p.values[i] = pval
+}
+options(digits = 4)
+p.values
+add96.sig.features = add96.features[which(p.values<0.05)]
+96-length(add96.sig.features)
+length(add96.sig.features)
+add96.sig.features
+```
+I fit a simple logistic regression and compute a p-value for marginal association between each additional feature and y. I have `r 96-length(add96.sig.features)` additional features that are insignificant at 0.05 level. But I still have `r length(add96.sig.features)` additional features that are significant. 
+
+### CV errors for 96 additional features
+The following table summarizes the number of features and their corresponding CV errors. When numbers of features are 3,4,...,92, their CV errors are very close. But when numbers of features are 1, 2, 93, 95, and 101, CV errors are relatively different. (Q2??? do not know how to interpret it) 
+```{r}
+X2.supportSize = X2fit.L0Learn.L0$suppsize
+X2.cvError = as.vector(X2fit.L0Learn.L0$cvmeans)
+X2.L0.cvError.df = data.frame(X2.supportSize, X2.cvError)
+X2.L0.cvError.df
+```
+
+## Susie with different prior_variance
+I run susie with various levels of prior_variance e.g. seq(0.1, 1, by=0.1) and find that susie is robust to have five features.
+Matthew said that 'There may be some funny things that happen in this “high signal” situation where the R^2 (proportion of variance in Y explained by X, which we also call PVE) is very large.' (Q3??? I'm not very sure about what "high signal" is.) 
+```{r}
+# Default prior_variance is 0.2
+prior_variances = seq(0.1, 1, by=0.1)
+sizes = numeric(10)
+for (j in 1:10){
+  X2fit.susie2 = susie(as.matrix(X2.train), y.binary.train, L=10, prior_variance = prior_variances[j])
+  X2.susie.CS2 = susie_get_CS(X2fit.susie2)
+  X2.susie.CSsize2 = c()
+  for (i in 1:10){
+    X2.susie.CSsize2 = c(X2.susie.CSsize2,length(X2.susie.CS2[[1]][[i]]))
+  }
+  size = sum(X2.susie.CSsize2<2000)
+  sizes[j]=size
+}
+sizes
+```
+
+
+# X1 analysis:
+Last time analyses on X1 show that glmnet needs 46 features, L0Learn with L0 regularization needs 3 features, and susie needs 15 sets of features. We want to further investigate why those methods select different numbers of features.
+
+## Four sparse regression methods
+Similarly, we first run four methods on X1: glmnet, L0, L0L2, and susie. Note that we also run L0L2 and it also only needs 1 feature(i.e.V8078), which is picked by all four methods. We check that L0 features and the L0L2 feature are all included by 15 sets of susie features. Like X2, glmnet features only have some overlappings with susie features. 
+
+### Fit glmnet
+```{r}
+X1fit.glmnet = cv.glmnet(X1.train,y.binary.train, family='binomial')
+```
+
+```{r}
+plot(X1fit.glmnet)
+```
+
+```{r}
+X1.glmnet.coefs = coef(X1fit.glmnet, s = "lambda.min")
+X1.glmnet.features = which(X1.glmnet.coefs!=0)-1
+X1.glmnet.coefVals = X1.glmnet.coefs[X1.glmnet.features+1]
+X1.glmnet.coefVals = X1.glmnet.coefVals[-1]
+X1.glmnet.features = X1.glmnet.features[-1]
+length(X1.glmnet.features)
+X1.glmnet.features
+X1.glmnet.coefVals
+```
+
+### Fit L0Learn with L0-regularization
+```{r}
+X1fit.L0Learn.L0 = L0Learn.cvfit(as.matrix(X1.train), y.binary.train, Penalty='L0')
+```
+
+```{r}
+lambdaIndex = which.min(X1fit.L0Learn.L0$cvmeans) # find the optimal lambda, which has minimum cv error
+X1coef.L0Learn.L0 = coef(X1fit.L0Learn.L0, lambda = X1fit.L0Learn.L0$lambda[lambdaIndex])
+X1coefIndex.L0Learn.L0 = which(X1coef.L0Learn.L0!=0)-1
+length(X1coefIndex.L0Learn.L0)-1
+X1coefIndex.L0Learn.L0 = X1coefIndex.L0Learn.L0[-1]
+X1coefIndex.L0Learn.L0
+X1coefValue.L0Learn.L0 = X1coef.L0Learn.L0[(X1coefIndex.L0Learn.L0+1)]
+X1coefValue.L0Learn.L0
+```
+
+### Fit L0Learn with L0L2-regularization: (Following https://github.com/hazimehh/L0Learn/wiki/Usage)
+```{r}
+X1fit.L0Learn.L0L2 = L0Learn.cvfit(as.matrix(X1.train), y.binary.train, Penalty='L0L2')
+```
+
+```{r}
+X1.L0L2.cv.error = lapply(X1fit.L0Learn.L0L2$cvmeans, min)
+X1.gammaIndex = 5 # observed from X1.L0L2.cv.error output
+X1.OptimalIndex = which.min(X1fit.L0Learn.L0L2$cvmeans[[X1.gammaIndex]])
+X1.OptimalLambda = X1fit.L0Learn.L0L2$lambda[[X1.gammaIndex]][X1.OptimalIndex]
+X1coef.L0Learn.L0L2 = coef(X1fit.L0Learn.L0L2, lambda=X1.OptimalLambda, gamma=X1fit.L0Learn.L0L2$gamma[5])
+X1coefIndex.L0Learn.L0L2 = which(X1coef.L0Learn.L0L2!=0)-1
+X1coefIndex.L0Learn.L0L2 = X1coefIndex.L0Learn.L0L2[-1]
+length(X1coefIndex.L0Learn.L0L2)
+X1coefIndex.L0Learn.L0L2
+X1coefValue.L0Learn.L0L2 = X1coef.L0Learn.L0L2[(X1coefIndex.L0Learn.L0L2+1)]
+X1coefValue.L0Learn.L0L2
+```
+
+### Fit susie
+```{r}
+X1fit.susie = susie(as.matrix(X1.train), y.binary.train, L=20)
+```
+
+```{r}
+X1.susie.CS = susie_get_CS(X1fit.susie)
+X1.susie.CSsize = c()
+for (i in 1:20){
+  X1.susie.CSsize = c(X1.susie.CSsize,length(X1.susie.CS[[1]][[i]]))
+}
+X1.susie.CSsize
+X1.susie.features = unlist(X1.susie.CS[[1]][1:15])
+X1.susie.features
+```
+
+### Whether features from glmnet, L0, and L0L2 are included by 15 sets of susie features?
+```{r}
+X1.glmnet.features %in% X1.susie.features
+X1coefIndex.L0Learn.L0 %in% X1.susie.features
+X1coefIndex.L0Learn.L0L2 %in% X1.susie.features
+```
+
+
+## Additional 256 features (259 susie - 3 L0 = 256)
+### Do additional features matter in the prediction?
+```{r}
+colSums(X1.train[,X1coefIndex.L0Learn.L0]!=0)
+colSums(X1.train[,X1.susie.features]!=0)
+```
+
+```{r}
+idx = which(X1coefIndex.L0Learn.L0%in%X1.susie.features)
+X1additional = X1.susie.features[-idx]
+X1additional_nonzeros = colSums(X1.train[,X1additional]!=0)
+X1additional_nonzeros
+```
+
+
+```{r}
+X1odd.additional = X1additional[X1additional_nonzeros>300]
+length(X1odd.additional)
+X1odd.additional
+```
+The output above displays `r length(X1odd.additional)` additional features that have more than 300 nonzeros. And some sums of their nonzeros are also large, compared to that of 3 L0 features. 
+
+```{r}
+colSums(X1.train[,X1odd.additional])
+colSums(X1.train[,X1coefIndex.L0Learn.L0])
+```
+
+### Whether additional 256 features are selected by random? Consider p-values.
+```{r, warning=FALSE}
+p.values = numeric(256)
+for (i in 1:256){
+  fit = glm(y.binary.train~X1.train[,X1additional[i]], family=binomial(link='logit'))
+  pval = as.numeric(coef(summary(fit))[,4][2])
+  p.values[i] = pval
+}
+options(digits = 4)
+p.values
+add256.sig.features = additional[which(p.values<0.05)]
+256-length(add256.sig.features)
+length(add256.sig.features)
+```
+I fit a simple logistic regression and compute a p-value for marginal association between each additional feature and y. I have `r 256-length(add256.sig.features)` additional features that are insignificant at 0.05 level. But I still have `r length(add256.sig.features)` additional features that are significant. 
+
+## Susie with different prior_variances
+I run susie with various levels of prior_variance seq(0.1, 1, by=0.1) and find that susie is not as robust as before. The number of sets varies from 11 to 15. 
+
+```{r}
+# Default prior_variance is 0.2
+prior_variances = seq(0.1, 1, by=0.1)
+sizes = numeric(10)
+for (j in 1:10){
+  X1fit.susie2 = susie(as.matrix(X1.train), y.binary.train, L=20, prior_variance = prior_variances[j])
+  X1.susie.CS2 = susie_get_CS(X1fit.susie2)
+  X1.susie.CSsize2 = c()
+  for (i in 1:20){
+    X1.susie.CSsize2 = c(X1.susie.CSsize2,length(X1.susie.CS2[[1]][[i]]))
+  }
+  size = sum(X1.susie.CSsize2<2000)
+  sizes[j]=size
+}
+sizes
+```
